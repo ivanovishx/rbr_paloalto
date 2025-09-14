@@ -98,10 +98,12 @@ function within(x: number, y: number) {
 
 function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
   const [tetrisScore, setTetrisScore] = useState(0)
   const [snakeScore, setSnakeScore] = useState(0)
   const [gameOver, setGameOver] = useState<string | null>(null)
   const [disableGameOver, setDisableGameOver] = useState(false)
+  const [volume, setVolume] = useState(0.5)
   // Keep score refs to avoid stale values inside the RAF loop closure
   const tetrisScoreRef = useRef(0)
   const snakeScoreRef = useRef(0)
@@ -263,9 +265,19 @@ function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [gameOver])
 
+  // Volume
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.volume = volume
+  }, [volume])
+
   // Game loop
   useEffect(() => {
     let raf = 0
+
+    // Start music
+    if (audioRef.current && audioRef.current.paused) {
+      audioRef.current.play().catch(() => {}) // Ignore errors if autoplay blocked
+    }
 
     function ensureApple() {
       if (!appleRef.current) spawnApple()
@@ -471,11 +483,15 @@ function App() {
           <button onClick={() => { setDisableGameOver(!disableGameOver); setGameOver(null); }}>
             {disableGameOver ? 'Enable Game Over' : 'Disable Game Over'}
           </button>
+          <div>
+            <label>Volume: <input type="range" min="0" max="1" step="0.1" value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} /></label>
+          </div>
         </div>
       </div>
       <footer>
         Built with React + TypeScript. Grid: {COLS}×{ROWS}
       </footer>
+      <audio ref={audioRef} src="tetris.mp3" loop />
     </div>
   )
 }
