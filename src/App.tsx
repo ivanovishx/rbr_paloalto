@@ -101,6 +101,10 @@ function App() {
   const [tetrisScore, setTetrisScore] = useState(0)
   const [snakeScore, setSnakeScore] = useState(0)
   const [gameOver, setGameOver] = useState<string | null>(null)
+  const [disableGameOver, setDisableGameOver] = useState(false)
+  // Keep score refs to avoid stale values inside the RAF loop closure
+  const tetrisScoreRef = useRef(0)
+  const snakeScoreRef = useRef(0)
 
   // Grid for static cells: tetris solid, apple. Active tetris and snake are drawn from state.
   function createGrid(): CellType[][] {
@@ -163,7 +167,7 @@ function App() {
     for (const p of blocks) {
       // Enforce horizontal bounds, and not below bottom
       if (p.x < 0 || p.x >= COLS || p.y >= ROWS) return false
-      // Allow negative y (above the visible board) during spawn/descent
+      // Allow negative y (above the visible board) during spawn/descent, but always collide with solids
       if (p.y >= 0 && gridRef.current[p.y][p.x] === 'tetris-solid') return false
       // We ignore snake for active tetris collisions; only solid tetris matters for placement
     }
@@ -182,7 +186,7 @@ function App() {
     nextRef.current = randomPiece()
     // If cannot place new piece, game over
     if (!canPlace(activeRef.current)) {
-      setGameOver('Tetris board filled')
+      if (!disableGameOver) setGameOver('Tetris board filled')
     }
   }
 
@@ -205,7 +209,13 @@ function App() {
         y++ // recheck same row
       }
     }
-    if (cleared > 0) setTetrisScore((s: number) => s + cleared * 10)
+    if (cleared > 0) {
+      setTetrisScore((s: number) => {
+        const next = s + cleared * 10
+        tetrisScoreRef.current = next
+        return next
+      })
+    }
   }
 
   // Input
@@ -262,11 +272,6 @@ function App() {
     }
 
     function step(now: number) {
-      if (gameOver) {
-        draw()
-        return
-      }
-
       // Tetris gravity
       if (now - lastGravityRef.current > TETRIS_GRAVITY_MS) {
         const next = { ...activeRef.current, pos: { x: activeRef.current.pos.x, y: activeRef.current.pos.y + 1 } }
@@ -283,24 +288,33 @@ function App() {
       if (now - lastSnakeStepRef.current > SNAKE_STEP_MS) {
         const head = snakeRef.current[0]
         const dir = snakeDirRef.current
-        const newHead = { x: head.x + dir.x, y: head.y + dir.y }
+        let newHead = { x: head.x + dir.x, y: head.y + dir.y }
         // collisions with wall
         if (!within(newHead.x, newHead.y)) {
-          setGameOver('Snake hit a wall')
-          draw()
-          return
+          if (disableGameOver) {
+            newHead.x = (newHead.x + COLS) % COLS
+            newHead.y = (newHead.y + ROWS) % ROWS
+          } else {
+            setGameOver('Snake hit a wall')
+            draw()
+            return
+          }
         }
         // collisions with tetris solid
         if (gridRef.current[newHead.y][newHead.x] === 'tetris-solid') {
-          setGameOver('Snake hit a Tetris piece')
-          draw()
-          return
+          if (!disableGameOver) {
+            setGameOver('Snake hit a Tetris piece')
+            draw()
+            return
+          }
         }
         // collisions with itself
         if (snakeRef.current.some((s) => s.x === newHead.x && s.y === newHead.y)) {
-          setGameOver('Snake hit itself')
-          draw()
-          return
+          if (!disableGameOver) {
+            setGameOver('Snake hit itself')
+            draw()
+            return
+          }
         }
 
         const ateApple = appleRef.current && newHead.x === appleRef.current.x && newHead.y === appleRef.current.y
@@ -309,7 +323,11 @@ function App() {
         snakeRef.current = newSnake
         if (ateApple) {
           appleRef.current = null
-          setSnakeScore((s: number) => s + 1)
+          setSnakeScore((s: number) => {
+            const next = s + 1
+            snakeScoreRef.current = next
+            return next
+          })
         }
         ensureApple()
         lastSnakeStepRef.current = now
@@ -322,7 +340,7 @@ function App() {
     ensureApple()
     raf = requestAnimationFrame(step)
     return () => cancelAnimationFrame(raf)
-  }, [gameOver])
+  }, [gameOver, disableGameOver])
 
   // Draw
   function draw() {
@@ -384,11 +402,11 @@ function App() {
     }
 
     // HUD
-    const total = tetrisScore + snakeScore
+    const total = tetrisScoreRef.current + snakeScoreRef.current
     ctx.fillStyle = '#ffffff'
     ctx.font = '14px system-ui, -apple-system, Segoe UI, Roboto, Arial'
-    ctx.fillText(`Tetris: ${tetrisScore}`, 8, 18)
-    ctx.fillText(`Snake: ${snakeScore}`, 8, 36)
+    ctx.fillText(`Tetris: ${tetrisScoreRef.current}`, 8, 18)
+    ctx.fillText(`Snake: ${snakeScoreRef.current}`, 8, 36)
     ctx.fillText(`Total: ${total}`, 8, 54)
 
     if (gameOver) {
@@ -425,6 +443,8 @@ function App() {
         lastSnakeStepRef.current = 0
         setTetrisScore(0)
         setSnakeScore(0)
+        tetrisScoreRef.current = 0
+        snakeScoreRef.current = 0
         setGameOver(null)
       }
     }
@@ -448,6 +468,9 @@ function App() {
               <li>Press <b>R</b> to restart</li>
             </ul>
           </div>
+          <button onClick={() => { setDisableGameOver(!disableGameOver); setGameOver(null); }}>
+            {disableGameOver ? 'Enable Game Over' : 'Disable Game Over'}
+          </button>
         </div>
       </div>
       <footer>
