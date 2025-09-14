@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from 'react'
 // Board dimensions
 const COLS = 12
 const ROWS = 20
-const CELL = 28 // pixel size per cell
+const CELL = 32 // pixel size per cell
 
 // Timings
 const TETRIS_GRAVITY_MS = 700
@@ -104,9 +104,12 @@ function App() {
   const [gameOver, setGameOver] = useState<string | null>(null)
   const [disableGameOver, setDisableGameOver] = useState(false)
   const [volume, setVolume] = useState(0.5)
+  const [flashActive, setFlashActive] = useState(false)
+  const [highScores, setHighScores] = useState<{ name: string; score: number; date: number }[]>([])
   // Keep score refs to avoid stale values inside the RAF loop closure
   const tetrisScoreRef = useRef(0)
   const snakeScoreRef = useRef(0)
+  const processedGameOverRef = useRef(false)
 
   // Grid for static cells: tetris solid, apple. Active tetris and snake are drawn from state.
   function createGrid(): CellType[][] {
@@ -164,6 +167,20 @@ function App() {
   }
 
   // Tetris helpers
+  function wouldCollideWithSnakeOrAppleOnNextFall(piece: ActivePiece): boolean {
+    // check each block one row below
+    const blocks = activeBlocks(piece)
+    for (const p of blocks) {
+      const nx = p.x
+      const ny = p.y + 1
+      // Only consider collisions within visible grid
+      if (ny >= 0 && ny < ROWS && nx >= 0 && nx < COLS) {
+        if (appleRef.current && appleRef.current.x === nx && appleRef.current.y === ny) return true
+        if (snakeRef.current.some((s) => s.x === nx && s.y === ny)) return true
+      }
+    }
+    return false
+  }
   function canPlace(piece: ActivePiece): boolean {
     const blocks = activeBlocks(piece)
     for (const p of blocks) {
@@ -217,6 +234,7 @@ function App() {
         tetrisScoreRef.current = next
         return next
       })
+      triggerFlash()
     }
   }
 
@@ -234,8 +252,16 @@ function App() {
         const p = { ...activeRef.current, pos: { x: activeRef.current.pos.x + 1, y: activeRef.current.pos.y } }
         if (canPlace(p)) { activeRef.current = p; acted = true }
       } else if (key === 's' || key === 'S') {
-        const p = { ...activeRef.current, pos: { x: activeRef.current.pos.x, y: activeRef.current.pos.y + 1 } }
-        if (canPlace(p)) { activeRef.current = p; acted = true } else { lockPiece(); acted = true }
+        const next = { ...activeRef.current, pos: { x: activeRef.current.pos.x, y: activeRef.current.pos.y + 1 } }
+        if (wouldCollideWithSnakeOrAppleOnNextFall(activeRef.current)) {
+          // suspend: do nothing (no lock)
+          acted = true
+        } else if (canPlace(next)) {
+          activeRef.current = next; acted = true
+        } else {
+          // blocked by floor/solid -> lock
+          lockPiece(); acted = true
+        }
       } else if (key === 'q' || key === 'Q') {
         const p = { ...activeRef.current, rotation: (activeRef.current.rotation + TETROMINOES[activeRef.current.shapeIndex].rotations.length - 1) % TETROMINOES[activeRef.current.shapeIndex].rotations.length }
         if (canPlace(p)) { activeRef.current = p; acted = true }
@@ -287,13 +313,17 @@ function App() {
       // Tetris gravity
       if (now - lastGravityRef.current > TETRIS_GRAVITY_MS) {
         const next = { ...activeRef.current, pos: { x: activeRef.current.pos.x, y: activeRef.current.pos.y + 1 } }
-        if (canPlace(next)) {
+        if (wouldCollideWithSnakeOrAppleOnNextFall(activeRef.current)) {
+          // suspend falling until path is clear
+          lastGravityRef.current = now
+        } else if (canPlace(next)) {
           activeRef.current = next
+          lastGravityRef.current = now
         } else {
-          // lock
+          // lock on floor or solid tetris
           lockPiece()
+          lastGravityRef.current = now
         }
-        lastGravityRef.current = now
       }
 
       // Snake step
@@ -340,6 +370,7 @@ function App() {
             snakeScoreRef.current = next
             return next
           })
+          triggerFlash()
         }
         ensureApple()
         lastSnakeStepRef.current = now
@@ -354,41 +385,92 @@ function App() {
     return () => cancelAnimationFrame(raf)
   }, [gameOver, disableGameOver])
 
+  // Music volume control
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.volume = volume
+  }, [volume])
+
+  // Start music on first loop
+  useEffect(() => {
+    if (audioRef.current && audioRef.current.paused) {
+      audioRef.current.play().catch(() => {})
+    }
+  }, [])
+
+  // High scores persistence via cookies
+  useEffect(() => {
+    const loaded = loadHighScoresFromCookie()
+    if (loaded) setHighScores(loaded)
+  }, [])
+
+  useEffect(() => {
+    // when game over, check high score once
+    if (gameOver && !processedGameOverRef.current) {
+      processedGameOverRef.current = true
+      const total = tetrisScoreRef.current + snakeScoreRef.current
+      const updated = maybeInsertHighScore(highScores, total)
+      if (updated) setHighScores(updated)
+    }
+    if (!gameOver) processedGameOverRef.current = false
+  }, [gameOver])
+
+  function triggerFlash() {
+    setFlashActive(true)
+    setTimeout(() => setFlashActive(false), 120)
+  }
+
   // Draw
   function draw() {
     const canvas = canvasRef.current
     if (!canvas) return
     const ctx = canvas.getContext('2d')!
 
-    // Resize canvas to exact pixel grid
-    canvas.width = COLS * CELL
-    canvas.height = ROWS * CELL
+    // DPR-aware sizing for crisp pixels
+    const dpr = (window.devicePixelRatio || 1)
+    const logicalW = COLS * CELL
+    const logicalH = ROWS * CELL
+    if (canvas.width !== Math.floor(logicalW * dpr) || canvas.height !== Math.floor(logicalH * dpr)) {
+      canvas.style.width = `${logicalW}px`
+      canvas.style.height = `${logicalH}px`
+      canvas.width = Math.floor(logicalW * dpr)
+      canvas.height = Math.floor(logicalH * dpr)
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
     // Background
     ctx.fillStyle = '#0a0f1a'
-    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    ctx.fillRect(0, 0, logicalW, logicalH)
+    if (flashActive) {
+      ctx.fillStyle = 'rgba(255,255,200,0.08)'
+      ctx.fillRect(0, 0, logicalW, logicalH)
+    }
 
-    // Grid background lines
-    ctx.strokeStyle = 'rgba(255,255,255,0.15)'
+    // Subtle checkerboard background to hint the grid (avoids 1px stroke artifacts)
+    const shade = 'rgba(255,255,255,0.03)'
+    ctx.fillStyle = shade
+    for (let y = 0; y < ROWS; y++) {
+      for (let x = 0; x < COLS; x++) {
+        if (((x + y) & 1) === 0) {
+          ctx.fillRect(x * CELL, y * CELL, CELL, CELL)
+        }
+      }
+    }
+
+    // HUD panel background for readability
+    const hudW = 200
+    const hudH = 70
+    ctx.fillStyle = 'rgba(0,0,0,0.45)'
+    ctx.strokeStyle = 'rgba(0,229,255,0.35)'
     ctx.lineWidth = 1
-    for (let x = 0; x <= COLS; x++) {
-      ctx.beginPath()
-      ctx.moveTo(x * CELL + 0.5, 0)
-      ctx.lineTo(x * CELL + 0.5, canvas.height)
-      ctx.stroke()
-    }
-    for (let y = 0; y <= ROWS; y++) {
-      ctx.beginPath()
-      ctx.moveTo(0, y * CELL + 0.5)
-      ctx.lineTo(canvas.width, y * CELL + 0.5)
-      ctx.stroke()
-    }
+    roundRect(ctx, 6, 6, hudW, hudH, 8)
+    ctx.fill()
+    ctx.stroke()
 
     // Draw tetris solid
     for (let y = 0; y < ROWS; y++) {
       for (let x = 0; x < COLS; x++) {
         if (gridRef.current[y][x] === 'tetris-solid') {
-          drawCell(ctx, x, y, '#2e7dd1')
+          drawCell(ctx, x, y, 'rgba(0,229,255,0.9)')
         }
       }
     }
@@ -405,32 +487,42 @@ function App() {
     // Draw snake
     for (let i = 0; i < snakeRef.current.length; i++) {
       const s = snakeRef.current[i]
-      drawCell(ctx, s.x, s.y, i === 0 ? '#6cf06c' : '#2fbf2f')
+      drawCell(ctx, s.x, s.y, i === 0 ? '#00ff9c' : 'rgba(0,255,156,0.7)')
     }
 
     // Draw apple
     if (appleRef.current) {
-      drawCell(ctx, appleRef.current.x, appleRef.current.y, '#ff4655')
+      drawCell(ctx, appleRef.current.x, appleRef.current.y, '#ff2bd6')
     }
 
     // HUD
     const total = tetrisScoreRef.current + snakeScoreRef.current
-    ctx.fillStyle = '#ffffff'
-    ctx.font = '14px system-ui, -apple-system, Segoe UI, Roboto, Arial'
-    ctx.fillText(`Tetris: ${tetrisScoreRef.current}`, 8, 18)
-    ctx.fillText(`Snake: ${snakeScoreRef.current}`, 8, 36)
-    ctx.fillText(`Total: ${total}`, 8, 54)
+    ctx.fillStyle = '#cfe7ff'
+    ctx.font = '16px system-ui, -apple-system, Segoe UI, Roboto, Arial'
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'top'
+    // Add subtle glow
+    ctx.shadowColor = 'rgba(0,229,255,0.6)'
+    ctx.shadowBlur = 6
+    ctx.fillText(`Tetris: ${tetrisScoreRef.current}`, 14, 14)
+    ctx.fillText(`Snake: ${snakeScoreRef.current}`, 14, 34)
+    ctx.fillText(`Total: ${total}`, 14, 54)
+    ctx.shadowBlur = 0
 
     if (gameOver) {
+      // Use logicalW/logicalH since we set a DPR transform earlier
+      const dprLogicalW = COLS * CELL
+      const dprLogicalH = ROWS * CELL
       ctx.fillStyle = 'rgba(0,0,0,0.6)'
-      ctx.fillRect(0, 0, canvas.width, canvas.height)
+      ctx.fillRect(0, 0, dprLogicalW, dprLogicalH)
       ctx.fillStyle = '#ffffff'
       ctx.font = 'bold 24px system-ui, -apple-system, Segoe UI, Roboto, Arial'
       ctx.textAlign = 'center'
-      ctx.fillText('Game Over', canvas.width / 2, canvas.height / 2 - 20)
+      ctx.textBaseline = 'alphabetic'
+      ctx.fillText('Game Over', dprLogicalW / 2, dprLogicalH / 2 - 20)
       ctx.font = '16px system-ui, -apple-system, Segoe UI, Roboto, Arial'
-      ctx.fillText(gameOver, canvas.width / 2, canvas.height / 2 + 6)
-      ctx.fillText('Press R to restart', canvas.width / 2, canvas.height / 2 + 28)
+      ctx.fillText(gameOver, dprLogicalW / 2, dprLogicalH / 2 + 6)
+      ctx.fillText('Press R to restart', dprLogicalW / 2, dprLogicalH / 2 + 28)
     }
   }
 
@@ -465,7 +557,7 @@ function App() {
   }, [])
 
   return (
-    <div className="container">
+    <div className={"container" + (flashActive ? " flash" : "") }>
       <h1>Tetris + Snake Co-op</h1>
       <div className="wrapper">
         <canvas ref={canvasRef} className="board" />
@@ -479,6 +571,15 @@ function App() {
               <li><b>Game Over:</b> Tetris board filled, or Snake hits wall/solid Tetris.</li>
               <li>Press <b>R</b> to restart</li>
             </ul>
+          </div>
+          <div className="card highscores">
+            <h2>High Scores</h2>
+            <ol>
+              {highScores.slice(0,10).map((h, i) => (
+                <li key={i}><span className="rank">{i+1}.</span> <span className="name">{h.name}</span> <span className="dots" /> <span className="score">{h.score}</span></li>
+              ))}
+              {highScores.length === 0 && <li>No scores yet</li>}
+            </ol>
           </div>
           <button onClick={() => { setDisableGameOver(!disableGameOver); setGameOver(null); }}>
             {disableGameOver ? 'Enable Game Over' : 'Disable Game Over'}
@@ -500,9 +601,20 @@ function drawCell(ctx: CanvasRenderingContext2D, x: number, y: number, color: st
   const px = x * CELL
   const py = y * CELL
   const r = 6
+  ctx.save()
+  // Outer neon glow
+  ctx.shadowColor = color
+  ctx.shadowBlur = 18
   ctx.fillStyle = color
   roundRect(ctx, px + 2, py + 2, CELL - 4, CELL - 4, r)
   ctx.fill()
+  // Inner highlight stroke
+  ctx.shadowBlur = 0
+  ctx.lineWidth = 1
+  ctx.strokeStyle = 'rgba(255,255,255,0.15)'
+  roundRect(ctx, px + 2, py + 2, CELL - 4, CELL - 4, r)
+  ctx.stroke()
+  ctx.restore()
 }
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
@@ -517,3 +629,31 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
 }
 
 export default App
+
+// High score helpers
+function loadHighScoresFromCookie(): { name: string; score: number; date: number }[] | null {
+  const match = document.cookie.split('; ').find((row) => row.startsWith('coop_highscores='))
+  if (!match) return null
+  try {
+    const value = decodeURIComponent(match.split('=')[1])
+    const parsed = JSON.parse(value)
+    if (Array.isArray(parsed)) return parsed
+  } catch {}
+  return null
+}
+
+function saveHighScoresToCookie(scores: { name: string; score: number; date: number }[]) {
+  const value = encodeURIComponent(JSON.stringify(scores.slice(0,10)))
+  const expires = new Date(Date.now() + 1000*60*60*24*365*5).toUTCString()
+  document.cookie = `coop_highscores=${value}; expires=${expires}; path=/; SameSite=Lax`
+}
+
+function maybeInsertHighScore(current: { name: string; score: number; date: number }[], score: number) {
+  const sorted = [...current].sort((a,b) => b.score - a.score)
+  const qualifies = sorted.length < 10 || score > (sorted[sorted.length - 1]?.score ?? -Infinity)
+  if (!qualifies) return null
+  const name = prompt('New High Score! Enter your name:')?.trim() || 'PLAYER'
+  const updated = [...sorted, { name, score, date: Date.now() }].sort((a,b) => b.score - a.score).slice(0,10)
+  saveHighScoresToCookie(updated)
+  return updated
+}
